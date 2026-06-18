@@ -1,0 +1,8 @@
+{
+  "name": "Megumin Suite",
+  "version": "1.0.0-gemrp",
+  "description": "Port of the SillyTavern Megumin Suite extension to GeminiRP. Provides modes, personalities, style templates, and prompt engineering tools. Local data is minimal placeholder — replace data/database.js and data/image_data.js with the full asset pack for full functionality.",
+  "author": "Megumin Suite (ported)",
+  "js": "index.js",
+  "loading_order": 8
+}
