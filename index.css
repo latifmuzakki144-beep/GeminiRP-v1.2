@@ -1,0 +1,14 @@
+/**
+ * index.css — Custom app styles (P7-hotfix)
+ *
+ * Sebelumnya file ini tidak ada, tapi <link rel="stylesheet" href="/index.css">
+ * di index.html mereferensikannya. Di Vite SPA mode, request ke file yang
+ * tidak ada di-fallback ke index.html → browser terima HTML, coba parse
+ * sebagai CSS → error parsing yang bisa mem-block render dan menyebabkan
+ * layar hitam sebelum React mount.
+ *
+ * File ini sekarang ada (kosong) agar request /index.css mengembalikan
+ * 200 + Content-Type: text/css yang valid. Tambahkan custom CSS Anda di sini.
+ */
+
+/* Custom styles dapat ditambahkan di bawah ini */

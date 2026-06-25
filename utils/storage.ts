@@ -1,5 +1,5 @@
 import { AppSettings, Character, DEFAULT_SETTINGS, Message } from "../types";
-import { db } from "./firebase";
+import { db, isFirebaseAvailable } from "./firebase";
 import { collection, doc, getDoc, setDoc, getDocs, deleteDoc, writeBatch } from "firebase/firestore";
 import localforage from "localforage";
 
@@ -136,6 +136,15 @@ import { compressImage } from "./imageUtils";
 
 export const syncFromCloud = async (progress?: (msg: string) => void) => {
     checkHouse();
+
+    // P7-hotfix: If Firebase failed to init (db === null), skip cloud sync
+    // and throw a clear error that App.tsx will catch + convert to a warning.
+    // Local data (localforage) remains the source of truth.
+    if (!isFirebaseAvailable()) {
+        if (progress) progress("Firebase tidak tersedia — mode LOCAL-ONLY.");
+        throw new Error("Firebase tidak tersedia (config placeholder atau init gagal). App berjalan dalam mode LOCAL-ONLY.");
+    }
+
     if (progress) progress("Mengunduh Pengaturan...");
     const settingsDoc = await getDoc(doc(db, 'houses', activeHouseId!, 'settings', 'main'));
     if (settingsDoc.exists()) {
@@ -168,7 +177,14 @@ export const syncFromCloud = async (progress?: (msg: string) => void) => {
 
 export const syncToCloud = async (progress?: (msg: string) => void) => {
     checkHouse();
-    
+
+    // P7-hotfix: If Firebase failed to init (db === null), skip cloud sync.
+    // Local data is already saved continuously via localforage, so this is safe.
+    if (!isFirebaseAvailable()) {
+        if (progress) progress("Firebase tidak tersedia — data tetap tersimpan lokal.");
+        throw new Error("Firebase tidak tersedia (config placeholder atau init gagal). Data tetap tersimpan lokal.");
+    }
+
     let batch = writeBatch(db);
     let count = 0;
     const commitBatch = async () => {

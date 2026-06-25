@@ -232,10 +232,10 @@ const App: React.FC = () => {
         console.warn("Cloud sync failed, proceeding in local-only mode:", syncErr);
         const reason = syncErr?.message || String(syncErr || 'unknown error');
         // Detect the most common cause: placeholder Firebase config
-        const isConfigError = reason.includes('remixed-') || reason.includes('Failed to get document') || reason.includes('client is offline') || reason.includes('unavailable');
+        const isConfigError = reason.includes('remixed-') || reason.includes('Failed to get document') || reason.includes('client is offline') || reason.includes('unavailable') || reason.includes('placeholder') || reason.includes('init gagal');
         const warning = isConfigError
-          ? 'Firebase belum dikonfigurasi (config masih placeholder). App berjalan dalam mode LOCAL-ONLY — data tersimpan di browser, tidak disinkronisasi ke cloud. Edit firebase-applet-config.json untuk mengaktifkan cloud sync.'
-          : `Sinkronisasi cloud gagal (${reason}). App berjalan dalam mode LOCAL-ONLY. Data tersimpan di browser.`;
+          ? 'Firebase belum dikonfigurasi (config masih placeholder). Mode LOCAL-ONLY aktif — data tersimpan di browser, tidak disinkronisasi ke cloud. Edit firebase-applet-config.json untuk mengaktifkan cloud sync.'
+          : `Sinkronisasi cloud gagal (${reason}). Mode LOCAL-ONLY aktif — data tersimpan di browser.`;
         setCloudSyncWarning(warning);
       }
       setHasHouse(true);

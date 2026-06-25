@@ -346,3 +346,99 @@ config Firebase project Anda yang sebenarnya (dari Firebase Console →
 Project Settings → Web App config). Jika tidak, app tetap berjalan
 normal dalam mode local-only (data tersimpan di browser via localforage,
 tidak disinkronisasi antar perangkat).
+
+---
+
+# Hotfix v1.3.2 — Black Screen Root Cause Fix (index.css + Firebase Defensive Init)
+
+## Konteks
+Audit user menemukan bahwa hotfix v1.3.1 sebelumnya (handleLogin try-catch)
+belum menangani dua akar penyebab lain dari layar hitam:
+
+1. **Missing `/index.css`** — `<link rel="stylesheet" href="/index.css">` di
+   `index.html` mereferensikan file yang tidak ada. Di Vite SPA mode
+   (`appType: "spa"` di server.ts), request ke file yang tidak ada
+   di-fallback ke `index.html`. Browser terima HTML (Content-Type: text/html),
+   coba parse sebagai CSS → CSS parsing error. Karena inline `<style>` di
+   `<head>` sudah set `body { background-color: #0f0f12 }` (nyaris hitam),
+   layar tampak hitam sebelum React mount.
+
+2. **Firebase init tidak defensive** — `utils/firebase.ts` lama memanggil
+   `initializeApp(firebaseConfig)` dan `getFirestore(app, databaseId)` di
+   top-level module tanpa try-catch. Dengan Firebase v12 config placeholder
+   tidak throw synchronously (terverifikasi via test), TAPI untuk Firebase
+   versi future atau config yang lebih malformed, throw bisa terjadi.
+   Jika throw di sini → seluruh module graph gagal load (firebase.ts →
+   storage.ts → App.tsx → index.tsx) → React tidak pernah mount →
+   layar hitam permanen.
+
+## Verifikasi Klaim User
+- `find . -iname "index.css"` → **tidak ditemukan** (konfirmasi klaim #1)
+- `curl http://localhost:3000/index.css` sebelum fix → HTTP 200 dengan
+  Content-Type: `text/html` (Vite SPA fallback ke index.html) — **konfirmasi
+  klaim #1**: browser terima HTML, coba parse sebagai CSS
+- Test `initializeApp` + `getFirestore` dengan config placeholder via
+  Node.js script → **tidak throw** dengan Firebase v12 (klaim #2 tidak
+  terkonfirmasi untuk v12, tapi tetap best practice untuk defensive init)
+
+## Fix v1.3.2
+
+### 1. Buat file `index.css` di root project
+File kosong dengan komentar penjelasan. Request `/index.css` sekarang
+di-serve dengan benar oleh Vite (200, di-inject sebagai CSS module dengan
+HMR di dev mode). Tidak lagi fallback ke index.html.
+
+### 2. Defensive Firebase init di `utils/firebase.ts`
+- Wrap `initializeApp` + `getFirestore` + `getAuth` dalam try-catch
+- Jika init gagal: `db = null`, `auth = null`, `firebaseInitError` di-set
+- Export `isFirebaseAvailable()` — return `false` jika:
+  - `db === null` (init gagal), ATAU
+  - Config terdeteksi sebagai placeholder (`remixed-project-id`, dll)
+- `validateConnection()` skip jika `db === null`
+
+### 3. Guard di `utils/storage.ts`
+- `syncFromCloud()`: cek `isFirebaseAvailable()` di awal. Jika false,
+  throw error sinkronis dengan pesan jelas (tidak tunggu 15+ detik
+  Firebase network timeout)
+- `syncToCloud()`: sama — throw cepat jika Firebase tidak tersedia
+
+### 4. Placeholder detection di `isFirebaseAvailable()`
+Deteksi config placeholder (`remixed-project-id`, `remixed-api-key`,
+`remixed-app-id`) dan langsung return false. Ini menghindari 15+ detik
+timeout saat `getDoc` gagal — sekarang login selesai dalam <5 detik.
+
+### 5. Warning message lebih clean
+Warning banner tidak lagi redundant ("Mode LOCAL-ONLY aktif" tidak diulang).
+Deteksi error diperluas: cek `placeholder` dan `init gagal` di message.
+
+### 6. README + Troubleshooting section
+README sekarang berisi:
+- Cara konfigurasi Firebase (opsional)
+- Troubleshooting layar hitam (3 langkah: Clear SW, Cek Console, index.css)
+- Penjelasan bahwa app jalan local-only out-of-the-box
+
+## Verifikasi (headless browser test)
+- Login dengan key random → **app masuk ke homepage dalam <5 detik**
+  (sebelumnya 15+ detik karena Firebase timeout)
+- Warning banner muncul: "Firebase belum dikonfigurasi (config masih
+  placeholder). Mode LOCAL-ONLY aktif..."
+- Homepage menampilkan sidebar lengkap + "Pilih Karakter" + "Belum ada
+  karakter"
+- Extensions loaded: Auto-Suggest, RP Style Booster, Megumin-Suite
+- `npx tsc --noEmit` → 0 errors
+- `npm run build` → sukses
+
+## File yang Dimodifikasi
+- `index.css` (BARU) — file kosong dengan komentar
+- `utils/firebase.ts` — defensive init + `isFirebaseAvailable()` +
+  placeholder detection
+- `utils/storage.ts` — guard `isFirebaseAvailable()` di syncFromCloud/syncToCloud
+- `App.tsx` — warning message lebih clean + deteksi error diperluas
+- `README.md` — troubleshooting section lengkap
+
+## Catatan untuk User yang Sudah Punya SW Cache Lama
+Jika setelah update masih layar hitam, kemungkinan PWA Service Worker
+men-cache versi lama. Fix:
+1. DevTools → Application → Service Workers → Unregister
+2. DevTools → Application → Storage → Clear site data
+3. Hard reload: Ctrl+Shift+R
