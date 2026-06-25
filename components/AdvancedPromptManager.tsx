@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { PromptEntry } from '../types';
+import { PromptEntry, PromptMarker } from '../types';
 
 interface Props {
   prompts: PromptEntry[];
@@ -20,6 +20,8 @@ const AdvancedPromptManager: React.FC<Props> = ({ prompts, onChange }) => {
       role: 'system',
       enabled: true,
       injectionPosition: prompts.length,
+      marker: 'auxiliary',
+      category: 'auxiliary',
     };
     onChange([...prompts, newPrompt]);
     setExpandedId(newPrompt.id);
@@ -141,6 +143,22 @@ const AdvancedPromptManager: React.FC<Props> = ({ prompts, onChange }) => {
                 <div className="flex-1 cursor-pointer flex items-center gap-3" onClick={() => setExpandedId(expandedId === prompt.id ? null : prompt.id)}>
                     <i className={`fas fa-${prompt.role === 'system' ? 'cog text-gray-400' : prompt.role === 'user' ? 'user text-blue-400' : 'robot text-green-400'}`}></i>
                     <span className={`font-medium ${prompt.enabled ? 'text-gray-200' : 'text-gray-600 line-through'}`}>{prompt.name || 'Unnamed Prompt'}</span>
+                    {/* P1: marker badge */}
+                    {prompt.marker && prompt.marker !== 'none' && (
+                        <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                                prompt.marker === 'jailbreak' ? 'bg-red-600/30 text-red-300' :
+                                prompt.marker === 'instruct_format' ? 'bg-amber-600/30 text-amber-300' :
+                                prompt.marker === 'world_info' ? 'bg-emerald-600/30 text-emerald-300' :
+                                prompt.marker === 'persona' ? 'bg-pink-600/30 text-pink-300' :
+                                prompt.marker === 'character' ? 'bg-indigo-600/30 text-indigo-300' :
+                                'bg-gray-700 text-gray-300'
+                            }`}
+                            title={`Marker: ${prompt.marker}`}
+                        >
+                            {prompt.marker}
+                        </span>
+                    )}
                 </div>
 
                 <div className="flex items-center gap-3">
@@ -162,19 +180,19 @@ const AdvancedPromptManager: React.FC<Props> = ({ prompts, onChange }) => {
             {/* Expanded Content */}
             {expandedId === prompt.id && (
                 <div className="p-4 border-t border-gray-750 bg-gray-950/50 space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-3 gap-4">
                         <div className="space-y-1">
                             <label className="text-xs text-gray-400">Name</label>
-                            <input 
-                                type="text" 
-                                value={prompt.name} 
+                            <input
+                                type="text"
+                                value={prompt.name}
                                 onChange={(e) => handleUpdate(prompt.id, 'name', e.target.value)}
                                 className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm text-white outline-none focus:border-primary-500"
                             />
                         </div>
                         <div className="space-y-1">
                             <label className="text-xs text-gray-400">Role</label>
-                            <select 
+                            <select
                                 value={prompt.role}
                                 onChange={(e) => handleUpdate(prompt.id, 'role', e.target.value)}
                                 className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm text-white outline-none focus:border-primary-500"
@@ -184,10 +202,37 @@ const AdvancedPromptManager: React.FC<Props> = ({ prompts, onChange }) => {
                                 <option value="assistant">Assistant</option>
                             </select>
                         </div>
+                        <div className="space-y-1">
+                            <label className="text-xs text-gray-400" title="Layer di layered prompt builder (P1). 'none' = diinjeksi in-chat sesuai injectionDepth.">Layer Marker</label>
+                            <select
+                                value={prompt.marker || 'none'}
+                                onChange={(e) => {
+                                    const m = e.target.value as PromptMarker;
+                                    handleUpdate(prompt.id, 'marker', m);
+                                    // Auto-set category to match marker
+                                    const cat = m === 'jailbreak' ? 'jailbreak'
+                                        : m === 'instruct_format' ? 'instruct'
+                                        : m === 'world_info' ? 'world'
+                                        : m === 'persona' ? 'persona'
+                                        : m === 'character' ? 'character'
+                                        : 'auxiliary';
+                                    handleUpdate(prompt.id, 'category', cat);
+                                }}
+                                className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm text-white outline-none focus:border-primary-500"
+                            >
+                                <option value="none">none (in-chat inject)</option>
+                                <option value="jailbreak">jailbreak</option>
+                                <option value="world_info">world_info</option>
+                                <option value="instruct_format">instruct_format</option>
+                                <option value="persona">persona</option>
+                                <option value="character">character</option>
+                                <option value="auxiliary">auxiliary</option>
+                            </select>
+                        </div>
                     </div>
                     <div className="space-y-1">
-                        <label className="text-xs text-gray-400">Content (Supports {`{{char}}`}, {`{{user}}`})</label>
-                        <textarea 
+                        <label className="text-xs text-gray-400">Content (Supports {`{{char}}`}, {`{{user}}`}, {`{{persona_description}}`}, {`{{persona_pronouns}}`}, {`{{persona_backstory}}`})</label>
+                        <textarea
                             value={prompt.content}
                             onChange={(e) => handleUpdate(prompt.id, 'content', e.target.value)}
                             rows={6}

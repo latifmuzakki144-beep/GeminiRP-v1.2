@@ -5,6 +5,7 @@ import { processPrompt } from "../utils/promptUtils";
 import { scanLorebook } from "../utils/loreUtils";
 import { globalEventBus, EVENT_TYPES } from "../utils/eventBus";
 import { flushExtensionPromptsInto } from "../utils/extensionLoader";
+import { buildLayeredSystemPrompt, applyInstructWrapping } from "../utils/layeredPromptBuilder";
 
 // --- HELPERS ---
 
@@ -32,54 +33,24 @@ const prepareHistory = (history: Message[], newMessage: string, limit: number): 
     return historyToSend;
 };
 
-const buildSystemPrompt = (character: Character, settings: AppSettings, history: Message[], newMessage: string): { systemInstruction: string; activeLoreIds: string[] } => {
-    
-    let systemInstruction = "";
-
-    // 1. Add specific character details
-    systemInstruction += `[Character Name: ${character.name}]\n[Description: ${character.description}]\n[Personality: ${character.personality}]\n[Scenario: ${processPrompt(character.scenario || 'Free roam', character.name, settings.userName)}]\n\n`;
-
-    // 3. Lorebook Scanning: Scan more deep into history to improve reliability
-    const recentHistoryText = history.slice(-6).map(m => m.content).join('\n---\n');
-    const textToScan = recentHistoryText + '\n---\n' + newMessage;
-    
-    const loreResult = scanLorebook(
-        textToScan, 
-        character.lorebook, 
-        character.name, 
-        settings.userName
-    );
-
-    if (loreResult.loreText) {
-        systemInstruction += `[LOREBOOK/WORLD INFO]:\n${loreResult.loreText}\n\n[DIRECTIVE]: Gunakan informasi di atas (Lorebook/World Info) jika relevan dengan situasi saat ini untuk memperkaya narasi dan menjaga konsistensi dunia. JANGAN abaikan detail tersebut jika sedang dibahas.\n\n`;
+// Layered system prompt builder (P1).
+// Delegates to utils/layeredPromptBuilder.ts so the assembly order
+// (Character -> Persona -> World Info -> Jailbreak -> Instruct Format -> Auxiliary)
+// is testable and reusable. This wrapper keeps the legacy call-site signature
+// (systemInstruction + activeLoreIds) intact.
+const buildSystemPrompt = (
+    character: Character,
+    settings: AppSettings,
+    history: Message[],
+    newMessage: string
+): { systemInstruction: string; activeLoreIds: string[] } => {
+    const result = buildLayeredSystemPrompt(character, settings, history, newMessage);
+    if (result.droppedLoreIds.length > 0) {
+        console.warn(`[Lorebook] ${result.droppedLoreIds.length} entri dilewati karena token budget. IDs:`, result.droppedLoreIds);
     }
-
-    // 4. Process Advanced Prompting Entries (SillyTavern Style System Prompts)
-    // Placed at the very end of the system block so the model prioritizes these rules (Jailbreak style).
-    if (settings.promptEntries && settings.promptEntries.length > 0) {
-        // Sort by injection position if provided
-        const sortedPrompts = [...settings.promptEntries]
-            .filter(p => p.enabled && p.role === 'system' && (p.injectionDepth === undefined || p.injectionDepth < 0))
-            .sort((a, b) => (a.injectionPosition || 0) - (b.injectionPosition || 0));
-
-        let systemPromptsText = "";
-        sortedPrompts.forEach(p => {
-            systemPromptsText += `\n\n${processPrompt(p.content, character.name, settings.userName)}`;
-        });
-
-        if (systemPromptsText) {
-            systemInstruction += `[SYSTEM/JAILBREAK DIRECTIVES]:${systemPromptsText}`;
-        }
-    } else {
-        // Fallback to legacy systemPrompt
-        if (settings.systemPrompt) {
-            systemInstruction += `\n\n[SYSTEM/JAILBREAK DIRECTIVES]:\n${processPrompt(settings.systemPrompt, character.name, settings.userName)}`;
-        }
-    }
-
     return {
-        systemInstruction,
-        activeLoreIds: loreResult.matchedEntries.map(e => e.id)
+        systemInstruction: result.systemInstruction,
+        activeLoreIds: result.activeLoreIds,
     };
 };
 
@@ -456,7 +427,7 @@ export const generateReply = async (
           // Inject each prompt at this depth
           // We reverse them so that evaluating them sequentially inserts them in correct sorted order
           [...prompts].reverse().forEach(p => {
-              const content = processPrompt(p.content, character.name, settings.userName);
+              const content = processPrompt(p.content, character.name, settings.userName, settings.persona);
               messages.splice(targetIndex, 0, {
                   role: p.role,
                   content: content
@@ -510,6 +481,11 @@ export const generateReply = async (
          finalMessages.push(m);
      }
   }
+
+  // P1: Apply instruct-mode wrapping (user/assistant/system prefixes) if enabled.
+  // This is applied AFTER extension hooks so extensions can still see raw content,
+  // but BEFORE the request goes out so the model sees the formatted turns.
+  finalMessages = applyInstructWrapping(finalMessages, settings.instructFormat);
 
   try {
     const content = await makeLLMRequest(settings, finalMessages, finalSystemInstruction || undefined);
@@ -656,3 +632,113 @@ export const translateLorebookKeys = async (
         throw new Error("Gagal menerjemahkan keys. Pastikan API Key valid dan model mendukung JSON.");
     }
 };
+
+// --- P6: AUTO-SUMMARIZE (ContextShift) ---
+// Estimates token usage of the active chat (history + new message + system prompt)
+// and decides whether an auto-summarize pass should run.
+const estimateTokens = (s: string): number => Math.ceil((s || "").length / 4);
+
+export interface SummarizeDecision {
+    shouldSummarize: boolean;
+    estimatedTokens: number;
+    threshold: number;
+    reason?: string;
+}
+
+/**
+ * Decide whether the chat should be auto-summarized before the next generation.
+ * Uses settings.autoSummarize config + estimated token usage.
+ */
+export const shouldAutoSummarize = (
+    history: Message[],
+    newMessage: string,
+    settings: AppSettings,
+    existingSummaryMsgCount: number
+): SummarizeDecision => {
+    const cfg = settings.autoSummarize;
+    if (!cfg || !cfg.enabled) {
+        return { shouldSummarize: false, estimatedTokens: 0, threshold: 0, reason: 'auto-summarize nonaktif' };
+    }
+
+    const totalChars = history.reduce((acc, m) => acc + (m.content?.length || 0), 0) + (newMessage?.length || 0);
+    const estimatedTokens = estimateTokens(String(totalChars));
+    const threshold = Math.floor(settings.contextLimit * cfg.triggerRatio);
+
+    // Don't summarize if there's not enough history yet
+    const effectiveMsgCount = Math.max(0, history.length - existingSummaryMsgCount);
+    if (effectiveMsgCount < cfg.minMessagesBeforeSummarize) {
+        return { shouldSummarize: false, estimatedTokens, threshold, reason: `pesan efektif (${effectiveMsgCount}) < minimum (${cfg.minMessagesBeforeSummarize})` };
+    }
+
+    if (estimatedTokens >= threshold) {
+        return { shouldSummarize: true, estimatedTokens, threshold, reason: `estimasi ${estimatedTokens} token ≥ threshold ${threshold}` };
+    }
+
+    return { shouldSummarize: false, estimatedTokens, threshold, reason: `estimasi ${estimatedTokens} token < threshold ${threshold}` };
+};
+
+/**
+ * Run the summarize pass.
+ * Returns:
+ *  - summaryText: the new summary string (to be persisted)
+ *  - newSummaryMsgCount: how many messages from the START of history are now covered
+ *    by this summary (existing summary msg count + newly summarized messages)
+ *  - trimmedHistory: history with the summarized messages removed from the front
+ */
+export const runAutoSummarize = async (
+    history: Message[],
+    settings: AppSettings,
+    character: Character,
+    existingSummary: { content: string; messageCount: number } | null,
+    opts: { keepRecentMessages?: number }
+): Promise<{
+    summaryText: string;
+    newSummaryMsgCount: number;
+    trimmedHistory: Message[];
+}> => {
+    const keepRecent = opts.keepRecentMessages ?? settings.autoSummarize?.keepRecentMessages ?? 6;
+    const alreadySummarized = existingSummary?.messageCount ?? 0;
+
+    // Messages to summarize = everything between the already-summarized point
+    // and the (length - keepRecent) tail.
+    const summarizeUpTo = Math.max(alreadySummarized, history.length - keepRecent);
+    const toSummarize = history.slice(alreadySummarized, summarizeUpTo);
+
+    if (toSummarize.length === 0) {
+        return {
+            summaryText: existingSummary?.content || '',
+            newSummaryMsgCount: alreadySummarized,
+            trimmedHistory: history,
+        };
+    }
+
+    const transcript = toSummarize.map(m => `[${m.role.toUpperCase()}]: ${m.content}`).join('\n\n');
+
+    const priorSummary = existingSummary?.content ? `Ringkasan sebelumnya:\n${existingSummary.content}\n\n` : '';
+
+    const prompt = `${priorSummary}Transkrip pesan yang perlu diringkas (urutan kronologis):\n${transcript}
+
+Instruksi:
+1. Buat ringkasan padat (maks 400 kata) yang menangkap: perkembangan plot penting, perubahan hubungan karakter, item/lore baru yang muncul, keputusan besar yang dibuat user, dan kondisi terkini adegan.
+2. Pertahankan nama karakter, nama tempat, dan detail penting secara verbatim.
+3. Tulis dalam Bahasa yang sama dengan transkrip.
+4. Output HANYA teks ringkasan, tanpa preamble, tanpa markdown.`;
+
+    const summaryText = await makeLLMRequest(
+        settings,
+        [{ role: 'user', content: prompt }],
+        "You are a precise roleplay summarizer. You output only the summary text, no preamble.",
+        false
+    );
+
+    const newSummaryMsgCount = summarizeUpTo;
+    // Trim history: remove the messages that were just summarized.
+    const trimmedHistory = history.slice(summarizeUpTo);
+
+    return {
+        summaryText: summaryText.trim(),
+        newSummaryMsgCount,
+        trimmedHistory,
+    };
+};
+

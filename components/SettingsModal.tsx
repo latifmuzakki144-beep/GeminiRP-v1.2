@@ -1,8 +1,15 @@
 
 import React from 'react';
-import { AppSettings, AVAILABLE_MODELS, PromptEntry } from '../types';
+import { AppSettings, AVAILABLE_MODELS, PromptEntry, PromptPreset, BUILTIN_PRESETS, DEFAULT_PERSONA, DEFAULT_INSTRUCT_FORMAT, DEFAULT_AUTO_SUMMARIZE } from '../types';
 import { exportAllData, importAllData } from '../utils/storage';
 import AdvancedPromptManager from './AdvancedPromptManager';
+import {
+    listAllPresets,
+    importPresetFromJSON,
+    applyPreset,
+    deleteUserPreset,
+    exportSettingsAsPreset,
+} from '../utils/presetManager';
 
 interface Props {
   isOpen: boolean;
@@ -19,6 +26,12 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, onSave, onD
   const [isLoadingModels, setIsLoadingModels] = React.useState(false);
   const [fetchError, setFetchError] = React.useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  // P1: Preset management state
+  const [presets, setPresets] = React.useState<PromptPreset[]>([]);
+  const [presetStatus, setPresetStatus] = React.useState('');
+  const presetFileInputRef = React.useRef<HTMLInputElement>(null);
+  // P1: persona export name
+  const [exportPresetName, setExportPresetName] = React.useState('My Preset');
 
   React.useEffect(() => {
     setLocalSettings(settings);
@@ -155,6 +168,66 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, onSave, onD
   };
 
   if (!isOpen) return null;
+
+  // P1: load preset list whenever modal opens
+  React.useEffect(() => {
+    if (isOpen) {
+      listAllPresets().then(setPresets).catch(e => console.warn('Failed to load presets', e));
+    }
+  }, [isOpen]);
+
+  // P1: import preset handler
+  const handlePresetImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+          const text = await file.text();
+          const preset = await importPresetFromJSON(text);
+          setPresets(await listAllPresets());
+          setPresetStatus(`Preset "${preset.name}" berhasil diimpor (${preset.promptEntries.length} prompt).`);
+          setTimeout(() => setPresetStatus(''), 4000);
+      } catch (err: any) {
+          alert('Gagal mengimpor preset: ' + (err?.message || 'format tidak valid'));
+      } finally {
+          e.target.value = '';
+      }
+  };
+
+  // P1: apply preset handler
+  const handleApplyPreset = (preset: PromptPreset) => {
+      const applySuggested = confirm(`Terapkan preset "${preset.name}"?\n\nKlik OK untuk mengganti promptEntries + instructFormat (suhu & context limit juga ikut saran preset). Cancel untuk hanya mengganti promptEntries + instructFormat.`);
+      const next = applyPreset(localSettings, preset, { applySuggested: applySuggested });
+      setLocalSettings(next);
+      setPresetStatus(`Preset "${preset.name}" diterapkan${applySuggested ? ' (termasuk suhu & context)' : ''}.`);
+      setTimeout(() => setPresetStatus(''), 4000);
+  };
+
+  // P1: delete user preset handler
+  const handleDeletePreset = async (preset: PromptPreset) => {
+      if (preset.source === 'official' || preset.source === 'community') {
+          alert('Preset bawaan tidak dapat dihapus.');
+          return;
+      }
+      if (!confirm(`Hapus preset "${preset.name}"?`)) return;
+      await deleteUserPreset(preset.id);
+      setPresets(await listAllPresets());
+      setPresetStatus('Preset dihapus.');
+      setTimeout(() => setPresetStatus(''), 3000);
+  };
+
+  // P1: export current settings as preset
+  const handleExportPreset = () => {
+      const json = exportSettingsAsPreset(localSettings, exportPresetName || 'My Preset');
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(exportPresetName || 'preset').replace(/[^a-z0-9_-]+/gi, '_')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setPresetStatus('Preset diekspor.');
+      setTimeout(() => setPresetStatus(''), 3000);
+  };
 
   const handleSave = () => {
     onSave(localSettings);
@@ -425,18 +498,6 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, onSave, onD
 
           <div className="h-px bg-gray-750 my-2"></div>
 
-          {/* User Profile */}
-          <div className="space-y-2">
-            <label className="block text-sm font-medium text-gray-300">Nama Pengguna (User Name)</label>
-            <input
-              type="text"
-              value={localSettings.userName || 'User'}
-              onChange={(e) => setLocalSettings({...localSettings, userName: e.target.value})}
-              className="w-full bg-gray-950 border border-gray-750 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none"
-              placeholder="Bagaimana AI memanggil Anda?"
-            />
-          </div>
-
           {/* Model Selection */}
           <div className="space-y-2">
             <div className="flex justify-between items-center">
@@ -533,11 +594,335 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, settings, onSave, onD
           </div>
 
           {/* Jailbreak / System Prompt (Legacy hidden, using Advanced Prompts now) */}
-          <AdvancedPromptManager 
+          <AdvancedPromptManager
             prompts={localSettings.promptEntries || []}
             onChange={(newPrompts) => setLocalSettings({...localSettings, promptEntries: newPrompts})}
           />
-          
+
+          {/* P1: Preset Manager (community presets + import .json) */}
+          <div className="space-y-3 bg-gray-900/50 p-4 rounded-xl border border-gray-700">
+             <div className="flex justify-between items-center">
+                 <h3 className="text-sm font-bold text-primary-400 uppercase tracking-widest">
+                     <i className="fas fa-magic mr-2"></i> Preset Prompt (P1)
+                 </h3>
+                 <div className="flex gap-2">
+                     <button onClick={() => presetFileInputRef.current?.click()} className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-xs flex items-center gap-1.5 transition" title="Impor preset dari .json (SillyTavern-compatible)">
+                         <i className="fas fa-file-import"></i> Impor .json
+                     </button>
+                     <input type="file" ref={presetFileInputRef} onChange={handlePresetImport} accept=".json,application/json" className="hidden" />
+                 </div>
+             </div>
+             <p className="text-xs text-gray-500">
+                 Preset adalah bundle promptEntries + instructFormat. Mendukung format native GeminiRP & preset SillyTavern. Klik preset untuk menerapkan.
+             </p>
+             <div className="space-y-2 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+                 {presets.length === 0 && (
+                     <p className="text-xs text-gray-500 italic">Belum ada preset.</p>
+                 )}
+                 {presets.map(p => (
+                     <div key={p.id} className={`p-3 rounded-lg border transition ${localSettings.activePresetId === p.id ? 'border-primary-500 bg-primary-600/10' : 'border-gray-700 bg-gray-950/50 hover:border-gray-600'}`}>
+                         <div className="flex justify-between items-start gap-2">
+                             <div className="flex-1 min-w-0">
+                                 <div className="flex items-center gap-2 flex-wrap">
+                                     <span className="font-bold text-white text-sm truncate">{p.name}</span>
+                                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${p.source === 'official' ? 'bg-primary-600/30 text-primary-300' : p.source === 'community' ? 'bg-blue-600/30 text-blue-300' : 'bg-gray-700 text-gray-300'}`}>
+                                         {p.source || 'user'}
+                                     </span>
+                                     {localSettings.activePresetId === p.id && (
+                                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/30 text-green-300">aktif</span>
+                                     )}
+                                 </div>
+                                 {p.description && <p className="text-xs text-gray-400 mt-1">{p.description}</p>}
+                                 <p className="text-[10px] text-gray-500 mt-1">{p.promptEntries.length} prompt • {p.author || 'unknown'}</p>
+                             </div>
+                             <div className="flex gap-1 shrink-0">
+                                 <button onClick={() => handleApplyPreset(p)} className="px-2 py-1 bg-primary-600 hover:bg-primary-500 text-white rounded text-xs transition" title="Terapkan preset">
+                                     <i className="fas fa-check"></i>
+                                 </button>
+                                 {p.source === 'user' && (
+                                     <button onClick={() => handleDeletePreset(p)} className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-300 rounded text-xs transition" title="Hapus preset">
+                                         <i className="fas fa-trash"></i>
+                                     </button>
+                                 )}
+                             </div>
+                         </div>
+                     </div>
+                 ))}
+             </div>
+             {/* Export current as preset */}
+             <div className="flex gap-2 pt-2 border-t border-gray-700">
+                 <input
+                     type="text"
+                     value={exportPresetName}
+                     onChange={(e) => setExportPresetName(e.target.value)}
+                     placeholder="Nama preset..."
+                     className="flex-1 bg-gray-950 border border-gray-750 rounded-lg p-2 text-white text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                 />
+                 <button onClick={handleExportPreset} className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-xs flex items-center gap-1.5 transition">
+                     <i className="fas fa-file-export"></i> Ekspor
+                 </button>
+             </div>
+             {presetStatus && <p className="text-center text-xs text-green-400 animate-pulse">{presetStatus}</p>}
+          </div>
+
+          {/* P3: User Persona Editor */}
+          <div className="space-y-3 bg-gray-900/50 p-4 rounded-xl border border-gray-700">
+             <div className="flex justify-between items-center">
+                 <h3 className="text-sm font-bold text-primary-400 uppercase tracking-widest">
+                     <i className="fas fa-user-circle mr-2"></i> User Persona (P3)
+                 </h3>
+                 <button
+                     onClick={() => setLocalSettings({
+                         ...localSettings,
+                         persona: { ...DEFAULT_PERSONA },
+                         userName: DEFAULT_PERSONA.name,
+                     })}
+                     className="text-xs text-gray-400 hover:text-white transition"
+                     title="Reset persona ke default"
+                 >
+                     <i className="fas fa-undo mr-1"></i> Reset
+                 </button>
+             </div>
+             <p className="text-xs text-gray-500">
+                 Persona disuntikkan ke system prompt sehingga karakter "mengenal" Anda. Macro yang bisa dipakai di prompt: <code>{`{{persona_description}}`}</code>, <code>{`{{persona_pronouns}}`}</code>, <code>{`{{persona_backstory}}`}</code>.
+             </p>
+             <div className="space-y-2">
+                 <label className="block text-sm font-medium text-gray-300">Nama Pengguna (User Name)</label>
+                 <input
+                     type="text"
+                     value={localSettings.userName || 'User'}
+                     onChange={(e) => setLocalSettings({
+                         ...localSettings,
+                         userName: e.target.value,
+                         persona: { ...(localSettings.persona || DEFAULT_PERSONA), name: e.target.value },
+                     })}
+                     className="w-full bg-gray-950 border border-gray-750 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none"
+                     placeholder="Bagaimana AI memanggil Anda?"
+                 />
+             </div>
+             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                 <div className="space-y-2">
+                     <label className="block text-sm font-medium text-gray-300">Pronouns</label>
+                     <input
+                         type="text"
+                         value={localSettings.persona?.pronouns || ''}
+                         onChange={(e) => setLocalSettings({
+                             ...localSettings,
+                             persona: { ...(localSettings.persona || DEFAULT_PERSONA), pronouns: e.target.value },
+                         })}
+                         className="w-full bg-gray-950 border border-gray-750 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none text-sm"
+                         placeholder="he/him, she/her, they/them"
+                     />
+                 </div>
+                 <div className="space-y-2">
+                     <label className="block text-sm font-medium text-gray-300">Deskripsi Singkat</label>
+                     <input
+                         type="text"
+                         value={localSettings.persona?.description || ''}
+                         onChange={(e) => setLocalSettings({
+                             ...localSettings,
+                             persona: { ...(localSettings.persona || DEFAULT_PERSONA), description: e.target.value },
+                         })}
+                         className="w-full bg-gray-950 border border-gray-750 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none text-sm"
+                         placeholder="Cewek 20-an, rambut pendek, jenaka"
+                     />
+                 </div>
+             </div>
+             <div className="space-y-2">
+                 <label className="block text-sm font-medium text-gray-300">Backstory Singkat</label>
+                 <textarea
+                     value={localSettings.persona?.backstory || ''}
+                     onChange={(e) => setLocalSettings({
+                         ...localSettings,
+                         persona: { ...(localSettings.persona || DEFAULT_PERSONA), backstory: e.target.value },
+                     })}
+                     rows={3}
+                     className="w-full bg-gray-950 border border-gray-750 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none text-sm leading-relaxed"
+                     placeholder="Sekolah di Akademi Mage, kakak kelas {{char}}, punya familiar rubah..."
+                 />
+             </div>
+          </div>
+
+          {/* P1: Instruct Format */}
+          <div className="space-y-3 bg-gray-900/50 p-4 rounded-xl border border-gray-700">
+             <div className="flex justify-between items-center">
+                 <h3 className="text-sm font-bold text-primary-400 uppercase tracking-widest">
+                     <i className="fas fa-quote-right mr-2"></i> Instruct Format (P1)
+                 </h3>
+                 <label className="relative inline-flex items-center cursor-pointer">
+                     <input
+                         type="checkbox"
+                         className="sr-only peer"
+                         checked={localSettings.instructFormat?.enabled ?? true}
+                         onChange={(e) => setLocalSettings({
+                             ...localSettings,
+                             instructFormat: { ...(localSettings.instructFormat || DEFAULT_INSTRUCT_FORMAT), enabled: e.target.checked },
+                         })}
+                     />
+                     <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-500"></div>
+                 </label>
+             </div>
+             <p className="text-xs text-gray-500">
+                 Aturan output ditempatkan di akhir system prompt (lapisan paling akhir) agar model paling kuat mematuhinya. Prefix hanya berlaku untuk provider OpenAI-compatible (bukan Gemini native).
+             </p>
+             {(localSettings.instructFormat?.enabled ?? true) && (
+                 <div className="space-y-3 animate-fade-in">
+                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                         <div className="space-y-1">
+                             <label className="text-xs text-gray-400">User Prefix</label>
+                             <input
+                                 type="text"
+                                 value={localSettings.instructFormat?.userPrefix || ''}
+                                 onChange={(e) => setLocalSettings({
+                                     ...localSettings,
+                                     instructFormat: { ...(localSettings.instructFormat || DEFAULT_INSTRUCT_FORMAT), userPrefix: e.target.value },
+                                 })}
+                                 className="w-full bg-gray-950 border border-gray-750 rounded-lg p-2 text-white text-sm font-mono outline-none focus:border-primary-500"
+                                 placeholder="(kosong = off)"
+                             />
+                         </div>
+                         <div className="space-y-1">
+                             <label className="text-xs text-gray-400">Assistant Prefix</label>
+                             <input
+                                 type="text"
+                                 value={localSettings.instructFormat?.assistantPrefix || ''}
+                                 onChange={(e) => setLocalSettings({
+                                     ...localSettings,
+                                     instructFormat: { ...(localSettings.instructFormat || DEFAULT_INSTRUCT_FORMAT), assistantPrefix: e.target.value },
+                                 })}
+                                 className="w-full bg-gray-950 border border-gray-750 rounded-lg p-2 text-white text-sm font-mono outline-none focus:border-primary-500"
+                                 placeholder="mis. Char: "
+                             />
+                         </div>
+                         <div className="space-y-1">
+                             <label className="text-xs text-gray-400">System Prefix</label>
+                             <input
+                                 type="text"
+                                 value={localSettings.instructFormat?.systemPrefix || ''}
+                                 onChange={(e) => setLocalSettings({
+                                     ...localSettings,
+                                     instructFormat: { ...(localSettings.instructFormat || DEFAULT_INSTRUCT_FORMAT), systemPrefix: e.target.value },
+                                 })}
+                                 className="w-full bg-gray-950 border border-gray-750 rounded-lg p-2 text-white text-sm font-mono outline-none focus:border-primary-500"
+                                 placeholder="(kosong = off)"
+                             />
+                         </div>
+                     </div>
+                     <div className="space-y-1">
+                         <label className="text-xs text-gray-400">Output Rules <span className="text-gray-600">(mendukung <code>{`{{char}}`}</code>, <code>{`{{user}}`}</code>)</span></label>
+                         <textarea
+                             value={localSettings.instructFormat?.outputRules || ''}
+                             onChange={(e) => setLocalSettings({
+                                 ...localSettings,
+                                 instructFormat: { ...(localSettings.instructFormat || DEFAULT_INSTRUCT_FORMAT), outputRules: e.target.value },
+                             })}
+                             rows={4}
+                             className="w-full bg-gray-950 border border-gray-750 rounded-lg p-2 text-white text-sm outline-none focus:border-primary-500 leading-relaxed"
+                             placeholder="Tetap dalam karakter, narasi orang ketiga, hindari pengulangan..."
+                         />
+                     </div>
+                 </div>
+             )}
+          </div>
+
+          {/* P6: Auto-summarize (ContextShift) */}
+          <div className="space-y-3 bg-gray-900/50 p-4 rounded-xl border border-gray-700">
+             <div className="flex justify-between items-center">
+                 <h3 className="text-sm font-bold text-primary-400 uppercase tracking-widest">
+                     <i className="fas fa-compress-arrows-alt mr-2"></i> Auto-Summarize / ContextShift (P6)
+                 </h3>
+                 <label className="relative inline-flex items-center cursor-pointer">
+                     <input
+                         type="checkbox"
+                         className="sr-only peer"
+                         checked={localSettings.autoSummarize?.enabled ?? false}
+                         onChange={(e) => setLocalSettings({
+                             ...localSettings,
+                             autoSummarize: { ...(localSettings.autoSummarize || DEFAULT_AUTO_SUMMARIZE), enabled: e.target.checked },
+                         })}
+                     />
+                     <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-500"></div>
+                 </label>
+             </div>
+             <p className="text-xs text-gray-500">
+                 Saat chat mendekati batas konteks, app otomatis meringkas pesan lama dan menghapusnya dari history aktif. Ringkasan disuntikkan kembali sebagai konteks jangka panjang.
+             </p>
+             {(localSettings.autoSummarize?.enabled ?? false) && (
+                 <div className="space-y-4 animate-fade-in">
+                     <div className="space-y-1">
+                         <div className="flex justify-between">
+                             <label className="text-xs text-gray-400">Trigger Ratio</label>
+                             <span className="text-xs text-primary-400 font-bold">{Math.round((localSettings.autoSummarize?.triggerRatio ?? 0.8) * 100)}% dari context limit</span>
+                         </div>
+                         <input
+                             type="range"
+                             min="0.5"
+                             max="0.95"
+                             step="0.05"
+                             value={localSettings.autoSummarize?.triggerRatio ?? 0.8}
+                             onChange={(e) => setLocalSettings({
+                                 ...localSettings,
+                                 autoSummarize: { ...(localSettings.autoSummarize || DEFAULT_AUTO_SUMMARIZE), triggerRatio: parseFloat(e.target.value) },
+                             })}
+                             className="w-full h-2 bg-gray-750 rounded-lg appearance-none cursor-pointer accent-primary-500"
+                         />
+                     </div>
+                     <div className="grid grid-cols-2 gap-3">
+                         <div className="space-y-1">
+                             <label className="text-xs text-gray-400">Keep Recent Messages</label>
+                             <input
+                                 type="number"
+                                 min={2}
+                                 max={50}
+                                 value={localSettings.autoSummarize?.keepRecentMessages ?? 6}
+                                 onChange={(e) => setLocalSettings({
+                                     ...localSettings,
+                                     autoSummarize: { ...(localSettings.autoSummarize || DEFAULT_AUTO_SUMMARIZE), keepRecentMessages: parseInt(e.target.value || '6', 10) },
+                                 })}
+                                 className="w-full bg-gray-950 border border-gray-750 rounded-lg p-2 text-white text-sm outline-none focus:border-primary-500"
+                             />
+                         </div>
+                         <div className="space-y-1">
+                             <label className="text-xs text-gray-400">Min Messages Before Summarize</label>
+                             <input
+                                 type="number"
+                                 min={4}
+                                 max={100}
+                                 value={localSettings.autoSummarize?.minMessagesBeforeSummarize ?? 12}
+                                 onChange={(e) => setLocalSettings({
+                                     ...localSettings,
+                                     autoSummarize: { ...(localSettings.autoSummarize || DEFAULT_AUTO_SUMMARIZE), minMessagesBeforeSummarize: parseInt(e.target.value || '12', 10) },
+                                 })}
+                                 className="w-full bg-gray-950 border border-gray-750 rounded-lg p-2 text-white text-sm outline-none focus:border-primary-500"
+                             />
+                         </div>
+                     </div>
+                 </div>
+             )}
+          </div>
+
+          {/* P4: Default UI Mode (chat vs VN) */}
+          <div className="space-y-3 bg-gray-900/50 p-4 rounded-xl border border-gray-700">
+             <h3 className="text-sm font-bold text-primary-400 uppercase tracking-widest">
+                 <i className="fas fa-desktop mr-2"></i> Tampilan Default (P4)
+             </h3>
+             <p className="text-xs text-gray-500">Mode tampilan default untuk chat baru. Bisa di-toggle per-chat dari halaman chat.</p>
+             <div className="grid grid-cols-2 gap-2">
+                 <button
+                     onClick={() => setLocalSettings({ ...localSettings, defaultUIMode: 'chat' })}
+                     className={`p-3 rounded-lg border text-sm transition ${localSettings.defaultUIMode === 'chat' || !localSettings.defaultUIMode ? 'border-primary-500 bg-primary-600/20 text-white' : 'border-gray-700 bg-gray-950/50 text-gray-400 hover:border-gray-600'}`}
+                 >
+                     <i className="fas fa-comments block mb-1"></i> Chat Mode
+                 </button>
+                 <button
+                     onClick={() => setLocalSettings({ ...localSettings, defaultUIMode: 'vn' })}
+                     className={`p-3 rounded-lg border text-sm transition ${localSettings.defaultUIMode === 'vn' ? 'border-primary-500 bg-primary-600/20 text-white' : 'border-gray-700 bg-gray-950/50 text-gray-400 hover:border-gray-600'}`}
+                 >
+                     <i className="fas fa-portrait block mb-1"></i> Visual Novel Mode
+                 </button>
+             </div>
+          </div>
+
           <div className="h-px bg-gray-750 my-4"></div>
 
           {/* Data Management */}

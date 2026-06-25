@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { AppSettings, Character, Message, LorebookEntry } from '../types';
 import { loadCharacters, loadChat, saveChat, saveCharacters, loadChatSummary, saveChatSummary, ChatSummary, deleteChat, deleteMessage } from '../utils/storage';
-import { generateReply, extractNewLore, makeLLMRequest } from '../services/geminiService';
+import { generateReply, extractNewLore, makeLLMRequest, shouldAutoSummarize, runAutoSummarize } from '../services/geminiService';
 import { parseJSONL, parseTextChat, exportToJSONL, exportToText } from '../utils/parsers';
 import LorebookModal from '../components/LorebookModal';
 import CollaborativeBridge from '../components/CollaborativeBridge';
@@ -77,6 +77,13 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
   const [summaryContent, setSummaryContent] = useState<string>('');
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [activeSummary, setActiveSummary] = useState<ChatSummary | null>(null);
+
+  // P4: VN Mode state — per-chat override (falls back to settings.defaultUIMode)
+  const [uiMode, setUiMode] = useState<'chat' | 'vn'>(settings.defaultUIMode || 'chat');
+  // P5: Slash command hint (briefly shown when user types /)
+  const [slashHint, setSlashHint] = useState<string | null>(null);
+  // P6: Auto-summarize status indicator
+  const [autoSummaryStatus, setAutoSummaryStatus] = useState<string>('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -230,6 +237,37 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
   const processResponse = async (fullHistory: Message[], userInput: string, hiddenDirection?: string) => {
       setIsLoading(true);
       isLoadingRef.current = true;
+
+      // P6: Auto-summarize (ContextShift) — check before generation
+      try {
+          const decision = shouldAutoSummarize(fullHistory, userInput, settings, activeSummary?.messageCount || 0);
+          if (decision.shouldSummarize && character) {
+              setAutoSummaryStatus('ContextShift: meringkas pesan lama...');
+              const result = await runAutoSummarize(fullHistory, settings, character, activeSummary, {});
+              if (result.summaryText && result.newSummaryMsgCount > (activeSummary?.messageCount || 0)) {
+                  const newSummary: ChatSummary = {
+                      content: result.summaryText,
+                      messageCount: result.newSummaryMsgCount,
+                  };
+                  setActiveSummary(newSummary);
+                  await saveChatSummary(character.id, newSummary);
+                  // Replace messages state with trimmed history (older messages removed from UI too,
+                  // since they are now captured in the summary that gets injected at request time).
+                  setMessages(result.trimmedHistory);
+                  setAutoSummaryStatus(`ContextShift: ${result.newSummaryMsgCount} pesan diringkas.`);
+                  setTimeout(() => setAutoSummaryStatus(''), 4000);
+                  // Update fullHistory reference so generation uses trimmed version
+                  fullHistory = result.trimmedHistory;
+              } else {
+                  setAutoSummaryStatus('');
+              }
+          }
+      } catch (e: any) {
+          console.warn('Auto-summarize failed (continuing with full history):', e?.message);
+          setAutoSummaryStatus('ContextShift gagal, lanjut dengan history penuh.');
+          setTimeout(() => setAutoSummaryStatus(''), 4000);
+      }
+
       try {
         let promptToSend = userInput;
         if (hiddenDirection) {
@@ -240,7 +278,7 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
         // generateReply expects history EXCLUDING the new message
         const baselineHistory = fullHistory.slice(0, -1);
         const { content: replyContent, activeLoreIds } = await generateReply(baselineHistory, promptToSend, character!, settings, activeSummary);
-        
+
         // Parse Thought
         const { content, thought } = parseThoughtAndContent(replyContent);
 
@@ -259,10 +297,10 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
         }
 
         // Add new Model message
-        const botMsg: Message = { 
+        const botMsg: Message = {
             id: uuid(),
-            role: 'model', 
-            content: textToUse, 
+            role: 'model',
+            content: textToUse,
             thought: thoughtToUse, // Active thought
             timestamp: Date.now(),
             candidates: [textToUse],
@@ -271,7 +309,7 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
             isThoughtExpanded: textToUse.trim() === '' && thoughtToUse.trim() !== '',
             activeLoreIds: activeLoreIds
         };
-        
+
         // Use functional update to ensure we don't overwrite user message
         setMessages(prev => [...prev, botMsg]);
 
@@ -291,7 +329,7 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
                      entry: l.entry || "",
                      enabled: true
                  }));
-                 
+
                  // Store as suggestions
                  setSuggestedLores(prev => [...prev, ...entriesToAdd]);
                  setNewLoreNotification(true);
@@ -302,10 +340,10 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
       } catch (error: any) {
         // Improved Error Handling: Inject error as a system message
         const errorMessage = `[SYSTEM ERROR]: ${error.message || 'Terjadi kesalahan tidak dikenal saat menghubungi AI.'}`;
-        const errorMsg: Message = { 
+        const errorMsg: Message = {
             id: uuid(),
-            role: 'model', 
-            content: errorMessage, 
+            role: 'model',
+            content: errorMessage,
             timestamp: Date.now(),
             candidates: [errorMessage],
             currentIndex: 0
@@ -317,10 +355,77 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
       }
   };
 
+  // P5: Slash Command handler
+  // Supported: /regen, /continue, /edit, /help, /vn, /chat, /summary
+  const handleSlashCommand = (raw: string): boolean => {
+      const trimmed = raw.trim();
+      if (!trimmed.startsWith('/')) return false;
+      const parts = trimmed.slice(1).split(/\s+/);
+      const cmd = (parts[0] || '').toLowerCase();
+
+      // Find last model message for /regen & /continue
+      const lastModelIdx = messages.length - 1 - [...messages].reverse().findIndex(m => m.role === 'model');
+      const lastModel = messages.find((m, i) => m.role === 'model' && i === lastModelIdx);
+
+      switch (cmd) {
+          case 'regen':
+          case 'regenerate':
+              if (lastModel) {
+                  handleRegenerate(lastModel.id);
+              } else {
+                  alert('Tidak ada pesan karakter untuk diregenerasi.');
+              }
+              return true;
+          case 'continue':
+          case 'cont':
+              // Ask the character to continue the last message
+              handleSendMessage('', 'Lanjutkan tulisan terakhirmu dari titik terputus, jangan ulang dari awal.');
+              return true;
+          case 'edit':
+              if (lastModel) {
+                  handleStartEdit(lastModel.id);
+              } else {
+                  alert('Tidak ada pesan karakter untuk diedit.');
+              }
+              return true;
+          case 'vn':
+              setUiMode('vn');
+              setSlashHint('Mode Visual Novel aktif.');
+              setTimeout(() => setSlashHint(null), 2000);
+              return true;
+          case 'chat':
+              setUiMode('chat');
+              setSlashHint('Mode Chat aktif.');
+              setTimeout(() => setSlashHint(null), 2000);
+              return true;
+          case 'summary':
+          case 'summarize':
+              setShowSummaryModal(true);
+              return true;
+          case 'help':
+              setSlashHint('Perintah: /regen, /continue, /edit, /vn, /chat, /summary, /help');
+              setTimeout(() => setSlashHint(null), 5000);
+              return true;
+          default:
+              alert(`Perintah tidak dikenal: /${cmd}\n\nPerintah yang tersedia: /regen, /continue, /edit, /vn, /chat, /summary, /help`);
+              return true;
+      }
+  };
+
   const handleSendMessage = async (overrideContent?: string, hiddenDirection?: string) => {
     let textToSend = typeof overrideContent === 'string' ? overrideContent : input;
+
+    // P5: Slash command interception (only when user typed input themselves, not from extension/bridge)
+    if (typeof overrideContent !== 'string' && textToSend.trim().startsWith('/')) {
+        const handled = handleSlashCommand(textToSend);
+        if (handled) {
+            setInput('');
+            return;
+        }
+    }
+
     if ((!textToSend.trim() && !hiddenDirection?.trim()) || !character || isLoadingRef.current) return;
-    
+
     isLoadingRef.current = true;
 
     // Extension Event hook: MESSAGE_SENDING (Allow extensions to check/modify prompt)
@@ -763,12 +868,21 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
             )}
 
             {/* Lorebook Toggle Button */}
-            <button 
+            <button
                 onClick={() => setIsLorebookOpen(true)}
                 className="text-gray-400 hover:text-primary-400 p-2 transition rounded-lg"
                 title="Buka Lorebook (World Info)"
             >
                 <i className="fas fa-book"></i>
+            </button>
+
+            {/* P4: VN Mode toggle */}
+            <button
+                onClick={() => setUiMode(uiMode === 'vn' ? 'chat' : 'vn')}
+                className={`p-2 transition rounded-lg ${uiMode === 'vn' ? 'bg-primary-600/30 text-primary-400' : 'text-gray-400 hover:text-white'}`}
+                title={uiMode === 'vn' ? 'Mode Visual Novel aktif. Klik untuk kembali ke Mode Chat.' : 'Aktifkan Mode Visual Novel (portrait + background)'}
+            >
+                <i className="fas fa-portrait"></i>
             </button>
 
             <button 
@@ -798,8 +912,38 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
         </div>
       </header>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 scroll-smooth custom-scrollbar relative">
+      {/* Messages Area — P4: VN Mode wraps messages with background + side portrait panel */}
+      <div
+        className={`flex-1 overflow-hidden relative ${uiMode === 'vn' && (character.backgroundUrl || character.avatarUrl) ? 'vn-mode' : ''}`}
+        style={uiMode === 'vn' && character.backgroundUrl ? {
+            backgroundImage: `linear-gradient(to bottom, rgba(15,15,18,0.65), rgba(15,15,18,0.85)), url(${character.backgroundUrl})`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            backgroundAttachment: 'fixed',
+        } : undefined}
+      >
+        {/* P4: VN side portrait panel (desktop only) */}
+        {uiMode === 'vn' && (
+            <div className="hidden lg:flex absolute left-0 top-0 bottom-0 w-72 xl:w-80 flex-col items-center justify-end pointer-events-none z-10 p-6">
+                <div className="pointer-events-auto flex flex-col items-center animate-fade-in">
+                    <div className="w-56 xl:w-64 aspect-[3/4] rounded-2xl overflow-hidden border-2 border-primary-500/30 shadow-2xl shadow-primary-900/40 bg-gray-950">
+                        <img
+                            src={character.vnPortraitUrl || character.avatarUrl}
+                            alt={character.name}
+                            className="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
+                        />
+                    </div>
+                    <div className="mt-3 px-4 py-2 bg-black/60 backdrop-blur-sm rounded-lg border border-primary-500/20 text-center">
+                        <p className="font-bold text-white text-sm">{character.name}</p>
+                        {character.scenario && (
+                            <p className="text-[10px] text-gray-400 italic mt-0.5 line-clamp-1">{character.scenario}</p>
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        <div className={`h-full overflow-y-auto p-4 sm:p-6 space-y-6 scroll-smooth custom-scrollbar relative ${uiMode === 'vn' ? 'lg:pl-80 xl:pl-96' : ''}`}>
         {/* DOM hook for SillyTavern extensions like TopInfoBar */}
         <div id="top-bar" className="w-full flex justify-center empty:hidden z-[100] sticky top-0"></div>
 
@@ -945,9 +1089,9 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
             };
 
             return (
-                <div key={msg.id} className={`flex w-full group ${isUser ? 'justify-end' : 'justify-start'}`}>
+                <div key={msg.id} className={`flex w-full group animate-fade-in ${isUser ? 'justify-end' : 'justify-start'}`}>
                     <div className={`flex flex-col max-w-[90%] md:max-w-[75%] ${isUser ? 'items-end' : 'items-start'}`}>
-                        
+
                         <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
                             {/* Avatar */}
                             <div className="shrink-0 w-8 h-8 rounded-full overflow-hidden mt-1 shadow-lg">
@@ -964,7 +1108,7 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
                                 {/* THOUGHT PROCESS BUBBLE */}
                                 {!isUser && msg.thought && (
                                     <div className="mb-2 max-w-full bg-gray-900/80 border border-gray-700/50 rounded-xl overflow-hidden shadow-sm animate-fade-in self-start w-full">
-                                        <div 
+                                        <div
                                             onClick={() => toggleThought(msg.id)}
                                             className="px-3 py-2 bg-gray-800/50 flex items-center justify-between cursor-pointer hover:bg-gray-800 transition"
                                         >
@@ -984,14 +1128,18 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
                                     </div>
                                 )}
 
-                                {/* Message Bubble */}
+                                {/* Message Bubble — P4: VN mode uses glassy translucent bubbles to match background */}
                                 <div className={`
-                                    relative px-5 py-3 rounded-2xl text-sm md:text-base leading-relaxed shadow-md whitespace-pre-wrap min-w-[120px]
-                                    ${isError 
+                                    relative px-5 py-3 rounded-2xl text-sm md:text-base leading-relaxed shadow-md whitespace-pre-wrap min-w-[120px] transition-all duration-300
+                                    ${isError
                                         ? 'bg-red-900/50 border border-red-500 text-red-100 rounded-tl-none'
-                                        : (isUser 
-                                            ? 'bg-primary-600 text-white rounded-tr-none' 
-                                            : 'bg-gray-800 text-gray-200 border border-gray-700 rounded-tl-none')
+                                        : (isUser
+                                            ? (uiMode === 'vn'
+                                                ? 'bg-primary-600/80 backdrop-blur-md text-white rounded-tr-none border border-primary-400/30'
+                                                : 'bg-primary-600 text-white rounded-tr-none')
+                                            : (uiMode === 'vn'
+                                                ? 'bg-black/60 backdrop-blur-md text-gray-100 border border-white/10 rounded-tl-none'
+                                                : 'bg-gray-800 text-gray-200 border border-gray-700 rounded-tl-none'))
                                     }
                                 `}>
                                 {isEditing ? (
@@ -1099,7 +1247,8 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
              </div>
         )}
         <div ref={messagesEndRef} />
-      </div>
+        </div>{/* end inner scroll container */}
+      </div>{/* end P4 VN-mode wrapper */}
 
       <div className="p-4 bg-gray-950 border-t border-gray-800 shrink-0">
         {/* Dynamic extension mount points in full SillyTavern style */}
@@ -1107,11 +1256,51 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
             <div id="chat-extension-bar" className="flex flex-wrap gap-2 text-xs"></div>
             <div id="chat-extension-zone" className="w-full"></div>
         </div>
+        {/* P6: Auto-summarize status */}
+        {autoSummaryStatus && (
+            <div className="max-w-4xl mx-auto mb-2 px-3 py-1.5 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs text-amber-300 flex items-center gap-2 animate-fade-in">
+                <i className="fas fa-circle-notch animate-spin"></i>
+                {autoSummaryStatus}
+            </div>
+        )}
+        {/* P5: Slash command hint */}
+        {slashHint && (
+            <div className="max-w-4xl mx-auto mb-2 px-3 py-1.5 bg-primary-500/10 border border-primary-500/30 rounded-lg text-xs text-primary-300 flex items-center gap-2 animate-fade-in">
+                <i className="fas fa-terminal"></i>
+                {slashHint}
+            </div>
+        )}
         <div className="max-w-4xl mx-auto relative">
             <textarea
                 id="chat-input-textarea"
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                    setInput(e.target.value);
+                    // P5: show live hint when user starts typing a slash command
+                    const v = e.target.value.trim();
+                    if (v.startsWith('/')) {
+                        const cmd = v.slice(1).split(/\s+/)[0]?.toLowerCase();
+                        const hints: Record<string, string> = {
+                            regen: '/regen — Buat ulang pesan karakter terakhir',
+                            regenerate: '/regenerate — Buat ulang pesan karakter terakhir',
+                            continue: '/continue — Minta karakter melanjutkan tulisan terakhir',
+                            cont: '/cont — Minta karakter melanjutkan tulisan terakhir',
+                            edit: '/edit — Edit pesan karakter terakhir',
+                            vn: '/vn — Aktifkan mode Visual Novel',
+                            chat: '/chat — Kembali ke mode Chat',
+                            summary: '/summary — Buka modal ringkasan manual',
+                            summarize: '/summarize — Buka modal ringkasan manual',
+                            help: '/help — Tampilkan semua perintah',
+                        };
+                        if (cmd && hints[cmd]) {
+                            setSlashHint(hints[cmd]);
+                        } else if (cmd) {
+                            setSlashHint(`Perintah /${cmd}... (tekan Enter untuk jalankan, atau /help untuk daftar)`);
+                        }
+                    } else if (slashHint) {
+                        setSlashHint(null);
+                    }
+                }}
                 onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
@@ -1119,10 +1308,10 @@ const ChatPage: React.FC<Props> = ({ settings }) => {
                     }
                 }}
                 disabled={isLoading}
-                placeholder={`Kirim pesan ke ${character?.name || 'Karakter'}...`}
-                className="w-full bg-gray-900 text-white rounded-xl border border-gray-700 p-4 pr-14 focus:ring-2 focus:ring-primary-500 focus:border-transparent outline-none resize-none shadow-inner h-[80px] custom-scrollbar" 
+                placeholder={`Kirim pesan ke ${character?.name || 'Karakter'}...  (atau ketik / untuk perintah: /regen, /continue, /edit, /vn, /chat, /summary, /help)`}
+                className="w-full bg-gray-900 text-white rounded-xl border border-gray-700 p-4 pr-14 focus:ring-2 focus:ring-primary-500 focus:border-transparent outline-none resize-none shadow-inner h-[80px] custom-scrollbar"
             />
-            <button 
+            <button
                 onClick={() => handleSendMessage()}
                 disabled={isLoading || !input.trim()}
                 className="absolute right-3 bottom-3 p-2 bg-primary-600 hover:bg-primary-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white rounded-lg transition-all shadow-lg"

@@ -35,7 +35,10 @@ const LorebookModal: React.FC<Props> = ({ isOpen, onClose, lorebook, onSave, set
           id: Date.now().toString(),
           keys: ['new keyword'],
           entry: '',
-          enabled: true
+          enabled: true,
+          priority: 10,        // P2: default priority (SillyTavern-aligned)
+          tokenBudget: 0,      // P2: 0 = unlimited
+          disable: false,
       };
       setEntries([...entries, newEntry]);
       setSelectedId(newEntry.id);
@@ -189,13 +192,22 @@ const LorebookModal: React.FC<Props> = ({ isOpen, onClose, lorebook, onSave, set
                         <p className="text-gray-500 text-xs text-center mt-10">Belum ada entry.</p>
                     )}
                     {entries.map(e => (
-                        <button 
-                            key={e.id} 
+                        <button
+                            key={e.id}
                             onClick={() => setSelectedId(e.id)}
-                            className={`w-full text-left p-3 rounded-lg text-sm transition flex justify-between items-center group ${selectedId === e.id ? 'bg-primary-600/20 text-white border border-primary-500/50' : 'text-gray-400 hover:bg-gray-800'}`}
+                            className={`w-full text-left p-3 rounded-lg text-sm transition flex justify-between items-center group ${selectedId === e.id ? 'bg-primary-600/20 text-white border border-primary-500/50' : 'text-gray-400 hover:bg-gray-800'} ${e.disable ? 'opacity-50' : ''}`}
                         >
-                            <span className="truncate font-mono">{e.keys[0] || 'Untitled'}</span>
-                            <span className={`w-2 h-2 rounded-full ${e.enabled ? 'bg-green-500' : 'bg-gray-600'}`}></span>
+                            <span className="truncate font-mono flex-1">{e.keys[0] || 'Untitled'}</span>
+                            <span className="flex items-center gap-1.5 ml-2 shrink-0">
+                                {/* P2: priority badge */}
+                                <span
+                                    className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-gray-700 text-gray-300"
+                                    title={`Priority: ${e.priority ?? 10}`}
+                                >
+                                    P{e.priority ?? 10}
+                                </span>
+                                <span className={`w-2 h-2 rounded-full ${e.disable ? 'bg-red-500' : e.enabled ? 'bg-green-500' : 'bg-gray-600'}`}></span>
+                            </span>
                         </button>
                     ))}
                 </div>
@@ -261,13 +273,54 @@ const LorebookModal: React.FC<Props> = ({ isOpen, onClose, lorebook, onSave, set
                                 Konten / Fakta
                                 <span className="block text-xs font-normal text-gray-500 mt-1">Informasi yang akan diingat AI. Gunakan <code>{`{{char}}`}</code> dan <code>{`{{user}}`}</code> jika perlu.</span>
                             </label>
-                            <textarea 
+                            <textarea
                                 value={selectedEntry.entry}
                                 onChange={(e) => handleUpdate(selectedEntry.id, 'entry', e.target.value)}
                                 rows={10}
                                 className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none text-sm leading-relaxed"
                                 placeholder="Tuliskan detail dunia, sejarah, atau fakta karakter di sini..."
                             />
+                        </div>
+
+                        {/* P2: Priority + Token Budget + Disable */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 border-t border-gray-800">
+                            <div className="space-y-2">
+                                <label className="block text-sm font-bold text-gray-300">
+                                    Prioritas
+                                    <span className="block text-xs font-normal text-gray-500 mt-1">Angka lebih tinggi = disuntikkan lebih dulu saat banyak entri cocok. Default 10.</span>
+                                </label>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    max={1000}
+                                    value={selectedEntry.priority ?? 10}
+                                    onChange={(e) => handleUpdate(selectedEntry.id, 'priority', parseInt(e.target.value || '10', 10))}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none text-sm"
+                                />
+                            </div>
+                            <div className="space-y-2">
+                                <label className="block text-sm font-bold text-gray-300">
+                                    Token Budget
+                                    <span className="block text-xs font-normal text-gray-500 mt-1">Maks token untuk entri ini. 0 = tanpa batas. Entri di-truncate jika melebihi.</span>
+                                </label>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    step={50}
+                                    value={selectedEntry.tokenBudget ?? 0}
+                                    onChange={(e) => handleUpdate(selectedEntry.id, 'tokenBudget', parseInt(e.target.value || '0', 10))}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none text-sm"
+                                />
+                            </div>
+                            <div className="space-y-2 flex flex-col justify-end">
+                                <label className="flex items-center gap-2 cursor-pointer select-none" title="Jika aktif, entri ini tidak akan pernah disuntikkan meskipun kata kunci cocok. Berguna untuk pause sementara tanpa hapus.">
+                                    <div className={`w-10 h-6 rounded-full p-1 transition-colors duration-300 ${selectedEntry.disable ? 'bg-red-600' : 'bg-gray-700'}`} onClick={() => handleUpdate(selectedEntry.id, 'disable', !selectedEntry.disable)}>
+                                        <div className={`w-4 h-4 bg-white rounded-full shadow-md transform transition-transform duration-300 ${selectedEntry.disable ? 'translate-x-4' : 'translate-x-0'}`}></div>
+                                    </div>
+                                    <span className="text-sm text-gray-300 font-bold">{selectedEntry.disable ? 'Hard-Disabled' : 'Aktif (default)'}</span>
+                                </label>
+                                <p className="text-xs text-gray-500">Hard-disable mengabaikan entri sepenuhnya, bahkan jika Always On aktif.</p>
+                            </div>
                         </div>
                     </div>
                 ) : (

@@ -25,6 +25,9 @@ const CharacterCreator: React.FC<Props> = ({ onSave, settings }) => {
   const [firstMessage, setFirstMessage] = useState('');
   const [scenario, setScenario] = useState('');
   const [avatarUrl, setAvatarUrl] = useState('');
+  // P4: VN mode assets
+  const [backgroundUrl, setBackgroundUrl] = useState('');
+  const [vnPortraitUrl, setVnPortraitUrl] = useState('');
   
   // World Info State
   const [lorebook, setLorebook] = useState<LorebookEntry[]>([]);
@@ -43,7 +46,10 @@ const CharacterCreator: React.FC<Props> = ({ onSave, settings }) => {
       firstMessage,
       scenario,
       avatarUrl: avatarUrl || `https://ui-avatars.com/api/?name=${name}`,
-      lorebook: lorebook
+      lorebook: lorebook,
+      // P4: VN mode assets (optional)
+      backgroundUrl: backgroundUrl || undefined,
+      vnPortraitUrl: vnPortraitUrl || undefined,
     };
 
     try {
@@ -146,6 +152,25 @@ const CharacterCreator: React.FC<Props> = ({ onSave, settings }) => {
           reader.readAsDataURL(file);
       }
   }
+
+  // P4: VN mode asset uploaders
+  const handleBackgroundUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) {
+          const reader = new FileReader();
+          reader.onloadend = () => setBackgroundUrl(reader.result as string);
+          reader.readAsDataURL(file);
+      }
+  };
+
+  const handleVnPortraitUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (file) {
+          const reader = new FileReader();
+          reader.onloadend = () => setVnPortraitUrl(reader.result as string);
+          reader.readAsDataURL(file);
+      }
+  };
 
   // --- World Info Handlers ---
   const addLorebookEntry = () => {
@@ -281,6 +306,66 @@ const CharacterCreator: React.FC<Props> = ({ onSave, settings }) => {
                 <div>
                     <label className="block text-sm font-bold text-white mb-1">Skenario</label>
                     <textarea value={scenario} onChange={e => setScenario(e.target.value)} rows={3} className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-primary-500 outline-none placeholder-gray-600" />
+                </div>
+            </div>
+
+            {/* P4: VN Mode Assets (optional) */}
+            <div className="border-t border-gray-800 pt-6 space-y-4">
+                <div>
+                    <h3 className="text-lg font-bold text-white"><i className="fas fa-portrait mr-2 text-primary-500"></i> Aset Visual Novel (Opsional)</h3>
+                    <p className="text-gray-400 text-sm">Tampilan alternatif saat user mengaktifkan Mode VN di halaman chat. Jika kosong, VN mode akan jatuh ke avatar.</p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Background */}
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">Background Scene</label>
+                        <div className="aspect-video bg-gray-800 rounded-xl overflow-hidden relative border-2 border-dashed border-gray-700 hover:border-gray-500 transition group">
+                            {backgroundUrl ? (
+                                <img src={backgroundUrl} alt="BG Preview" className="w-full h-full object-cover" />
+                            ) : (
+                                <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                                    <i className="fas fa-image text-3xl mb-2"></i>
+                                    <span className="text-sm">Klik untuk Upload Background</span>
+                                </div>
+                            )}
+                            <input type="file" accept="image/*" onChange={handleBackgroundUpload} className="absolute inset-0 opacity-0 cursor-pointer" />
+                            {backgroundUrl && (
+                                <button
+                                    type="button"
+                                    onClick={() => setBackgroundUrl('')}
+                                    className="absolute top-2 right-2 bg-black/60 hover:bg-red-600/80 text-white p-1.5 rounded-lg text-xs transition"
+                                    title="Hapus background"
+                                >
+                                    <i className="fas fa-times"></i>
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    {/* VN Portrait */}
+                    <div>
+                        <label className="block text-sm font-medium text-gray-300 mb-2">VN Portrait (opsional, jatuh ke avatar)</label>
+                        <div className="aspect-[3/4] bg-gray-800 rounded-xl overflow-hidden relative border-2 border-dashed border-gray-700 hover:border-gray-500 transition group max-w-[200px]">
+                            {vnPortraitUrl ? (
+                                <img src={vnPortraitUrl} alt="Portrait Preview" className="w-full h-full object-cover" />
+                            ) : (
+                                <div className="flex flex-col items-center justify-center h-full text-gray-500">
+                                    <i className="fas fa-user-tie text-3xl mb-2"></i>
+                                    <span className="text-sm text-center px-2">Klik untuk Upload Portrait</span>
+                                </div>
+                            )}
+                            <input type="file" accept="image/*" onChange={handleVnPortraitUpload} className="absolute inset-0 opacity-0 cursor-pointer" />
+                            {vnPortraitUrl && (
+                                <button
+                                    type="button"
+                                    onClick={() => setVnPortraitUrl('')}
+                                    className="absolute top-2 right-2 bg-black/60 hover:bg-red-600/80 text-white p-1.5 rounded-lg text-xs transition"
+                                    title="Hapus portrait"
+                                >
+                                    <i className="fas fa-times"></i>
+                                </button>
+                            )}
+                        </div>
+                    </div>
                 </div>
             </div>
 

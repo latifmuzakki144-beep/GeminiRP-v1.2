@@ -5,7 +5,7 @@ import { exec } from "child_process";
 import { createServer as createViteServer } from "vite";
 
 const app = express();
-const PORT = 3002;
+const PORT = 3000;
 
 app.use(express.json());
 

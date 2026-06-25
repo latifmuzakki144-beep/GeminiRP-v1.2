@@ -149,3 +149,152 @@ berfungsi — legacy event `MESSAGE_SENDING`, `CHARACTER_CHANGED`, `CHAT_RESET`
 dipertahankan apa adanya, dan `window.MyApp.getContext()` masih mengembalikan
 semua field yang sebelumnya ada (`eventSource`, `event_types`, `chat`,
 `settings`, `callLLM`).
+
+---
+
+# GeminiRP v1.3 — SillyTavern Parity Upgrade
+
+Tujuan: mengimplementasikan 7 rekomendasi pengembangan prioritas untuk menutup
+gap dengan SillyTavern sambil mempertahankan keunggulan unik GeminiRP
+(cloud sync Firebase, web/no-install, mobile-first, multi-provider).
+
+## Ringkasan Fitur Baru
+
+### P1 (Prioritas Tinggi) — Layered System Prompt Builder
+- **`utils/layeredPromptBuilder.ts`** (baru): membangun system instruction
+  dalam 6 lapisan terurut: **Character → Persona → World Info → Jailbreak →
+  Instruct Format → Auxiliary**. Setiap lapisan dipisahkan divider visual
+  agar model dapat membedakan blok secara jelas. Struktur ini secara
+  signifikan mengurangi penolakan (refusal) karena jailbreak ditempatkan
+  di atas instruct layer, bukan terkubur di dalam konteks karakter.
+- **`utils/presetManager.ts`** (baru): manajemen preset prompt komunitas.
+  Mendukung import `.json` dengan 4 format:
+  1. Native GeminiRP `PromptPreset`
+  2. SillyTavern preset (`{ prompts: [...] }`)
+  3. Array prompt mentah
+  4. Single prompt object
+  Disertai 3 preset bawaan: **Narrative Default**, **Augment JB**
+  (hardened jailbreak), **Safe/SFW Narrative**.
+- **`PromptMarker`** type: menandai setiap `PromptEntry` dengan peran
+  semantik (jailbreak / world_info / instruct_format / persona / character /
+  auxiliary / none) sehingga builder tahu ke lapisan mana prompt
+  tersebut harus masuk.
+- **`InstructFormat`** interface: aturan output (systemPrefix, userPrefix,
+  assistantPrefix, outputRules) yang diterapkan di akhir system block
+  dan sebagai prefix per-turn untuk provider OpenAI-compatible.
+- **UI**: panel Preset Manager + Instruct Format di SettingsModal;
+  dropdown Layer Marker + badge berwarna di AdvancedPromptManager.
+
+### P2 — Lorebook Priority + Token Budget
+- Field baru di `LorebookEntry`: `priority` (default 10), `tokenBudget`
+  (default 0 = unlimited), `disable` (hard-disable override).
+- `scanLorebook` sekarang mengurutkan entri yang cocok berdasarkan
+  priority desc (stable), kemudian menegakkan:
+  - per-entry tokenBudget (truncate entry jika melebihi)
+  - global totalBudget (25% dari contextLimit; entri lower-priority
+    di-drop jika budget habis)
+  - Mengembalikan `droppedEntries` sehingga UI bisa surface info.
+- **UI**: grid 3-kolom Prioritas / Token Budget / Hard-Disable di
+  LorebookModal; sidebar menampilkan badge `P{priority}` dan dot
+  merah untuk entri yang di-hard-disable.
+
+### P3 — User Persona
+- `Persona` interface: name, description, pronouns, backstory.
+- `processPrompt` sekarang menerima optional `persona` dan menggantikan
+  macro `{{persona_description}}`, `{{persona_pronouns}}`,
+  `{{persona_backstory}}`.
+- Persona disuntikkan ke system prompt sebagai blok kedua
+  (setelah Character, sebelum World Info) — karakter jadi "mengenal"
+  pemain.
+- **UI**: panel User Persona di SettingsModal dengan field name
+  (sync ke userName), pronouns, description, backstory + tombol Reset.
+
+### P4 — Visual Novel Mode
+- Field baru di `Character`: `backgroundUrl`, `vnPortraitUrl`.
+- Toggle VN/Chat mode di chat header (icon portrait) + perintah
+  slash `/vn` dan `/chat`.
+- VN mode:
+  - Background full-screen dengan overlay gradient (dari
+    `character.backgroundUrl`)
+  - Side portrait panel (desktop only, lg+) dengan portrait
+    `character.vnPortraitUrl` atau fallback ke `avatarUrl`
+  - Bubble chat menjadi translucent glassy (`backdrop-blur-md`,
+    semi-transparent) agar menyatu dengan background
+  - Animasi `fade-in` pada setiap pesan baru
+- **UI CharacterCreator**: section "Aset Visual Novel (Opsional)"
+  dengan uploader Background Scene + VN Portrait + tombol clear.
+
+### P5 — Slash Commands
+- `handleSlashCommand(raw)` interceptor di `handleSendMessage`:
+  - `/regen` atau `/regenerate` — regenerate pesan karakter terakhir
+  - `/continue` atau `/cont` — minta karakter melanjutkan tulisan
+  - `/edit` — edit pesan karakter terakhir
+  - `/vn` — aktifkan mode Visual Novel
+  - `/chat` — kembali ke mode Chat
+  - `/summary` atau `/summarize` — buka modal ringkasan manual
+  - `/help` — tampilkan semua perintah
+- Live hint di textarea saat user mengetik `/` — menampilkan
+  deskripsi singkat perintah yang sedang diketik.
+- Interceptor hanya aktif untuk input user (bukan injection dari
+  bridge/extension) sehingga tidak mengganggu alur lain.
+
+### P6 — Auto-Summarize (ContextShift)
+- `AutoSummarizeConfig`: enabled, triggerRatio (0.5–0.95, default
+  0.8), keepRecentMessages (default 6), minMessagesBeforeSummarize
+  (default 12).
+- `shouldAutoSummarize()` menghitung estimasi token history + pesan
+  baru, membandingkan dengan `contextLimit * triggerRatio`.
+- `runAutoSummarize()` meringkas pesan antara `existingSummary.messageCount`
+  dan `history.length - keepRecentMessages`, menggabungkan dengan
+  ringkasan sebelumnya, lalu meng-trimm history.
+- Di `processResponse`: auto-summarize berjalan SEBELUM generateReply.
+  Summary baru di-persist via `saveChatSummary`, state `messages`
+  di-trim, dan fullHistory reference diupdate sehingga generateReply
+  menggunakan history yang sudah dipangkas.
+- Failure non-fatal: jika summarize gagal, lanjut dengan history
+  penuh + tampilkan status warning.
+- **UI**: panel Auto-Summarize di SettingsModal + status banner
+  (amber, animate-fade-in) di atas input saat berjalan.
+
+### P7 — Keunggulan Unik Dipertahankan
+Semua perubahan di atas dirancang untuk tidak mengganggu:
+- **Cloud sync Firebase**: `syncFromCloud` / `syncToCloud` tidak
+  diubah. `loadSettings` tetap merge dengan `DEFAULT_SETTINGS`
+  sehingga field baru (persona, instructFormat, autoSummarize,
+  defaultUIMode, activePresetId) otomatis terisi default untuk
+  user lama tanpa migrasi eksplisit.
+- **Web/no-install**: PWA config di `vite.config.ts` utuh
+  (`display: standalone`, theme_color, runtime caching).
+- **Mobile-first**: semua UI baru menggunakan grid responsive
+  (`grid-cols-1 md:grid-cols-2`, `lg:` breakpoints untuk VN
+  side panel yang hanya muncul di desktop).
+- **Multi-provider**: tidak ada perubahan pada `makeLLMRequest`.
+  Instruct prefix wrapping diterapkan ke semua provider
+  OpenAI-compatible; Gemini native tetap menggunakan systemInstruction.
+
+## Verifikasi Build
+- `npx tsc --noEmit` → 0 error
+- `npm run build` → sukses, 2216 modules transformed, PWA SW
+  generated, server bundled (10.2kb)
+- Output: `dist/` (frontend) + `dist/server.cjs` (backend)
+
+## File Baru
+- `utils/layeredPromptBuilder.ts`
+- `utils/presetManager.ts`
+
+## File Dimodifikasi
+- `types.ts` — tambah Persona, InstructFormat, PromptMarker,
+  AutoSummarizeConfig, PromptPreset, BUILTIN_PRESETS, field baru
+  di LorebookEntry & Character & PromptEntry & AppSettings
+- `utils/promptUtils.ts` — processPrompt menerima persona + macro baru
+- `utils/loreUtils.ts` — scanLorebook priority + budget-aware
+- `services/geminiService.ts` — gunakan buildLayeredSystemPrompt,
+  applyInstructWrapping, shouldAutoSummarize, runAutoSummarize
+- `components/SettingsModal.tsx` — 5 panel baru (Preset, Persona,
+  Instruct, Auto-summarize, Default UI Mode)
+- `components/AdvancedPromptManager.tsx` — Layer Marker dropdown
+  + badge
+- `components/LorebookModal.tsx` — field priority/tokenBudget/disable
+- `pages/ChatPage.tsx` — VN mode wrapper, slash command handler,
+  auto-summarize runtime, status banners
+- `pages/CharacterCreator.tsx` — uploader backgroundUrl & vnPortraitUrl
