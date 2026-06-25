@@ -298,3 +298,51 @@ Semua perubahan di atas dirancang untuk tidak mengganggu:
 - `pages/ChatPage.tsx` — VN mode wrapper, slash command handler,
   auto-summarize runtime, status banners
 - `pages/CharacterCreator.tsx` — uploader backgroundUrl & vnPortraitUrl
+
+---
+
+# Hotfix v1.3.1 — Black Screen on Login (Firebase Placeholder Config)
+
+## Root Cause
+`firebase-applet-config.json` berisi nilai placeholder (`remixed-project-id`,
+`remixed-api-key`, dll). Saat user klik "Lanjut" di login screen:
+
+1. `handleLogin` memanggil `syncFromCloud()` yang melakukan `getDoc()` ke
+   Firestore dengan config placeholder
+2. Firebase SDK mencoba koneksi ke endpoint non-existent → **hang 8+ detik**
+3. Selama hang, loading screen gelap (`#0f0f12`) dengan spinner kecil
+   muncul → **terlihat seperti layar hitam**
+4. Error "Failed to get document because the client is offline" di-catch
+5. **User ter-stuck** — `handleLogin` memperlakukan error sync sebagai
+   error login, jadi `setHasHouse(true)` tidak pernah dipanggil
+
+## Fix
+- **`App.tsx` — `handleLogin`**: `syncFromCloud` sekarang di-wrap di
+  try-catch terpisah. Jika sync gagal, app tetap proceed ke
+  `setHasHouse(true)` (mode LOCAL-ONLY) dan menampilkan warning banner
+  non-blocking.
+- **`App.tsx` — `handleLogout`**: `syncToCloud` juga di-wrap terpisah.
+  Jika sync gagal, logout tetap berhasil (data lokal sudah tersimpan
+  via localforage).
+- **`App.tsx` — Layout**: tambah `cloudSyncWarning` prop + banner
+  amber dismissible di atas main content. Mendeteksi 2 skenario:
+  - Config placeholder → "Firebase belum dikonfigurasi..."
+  - Network/other error → "Sinkronisasi cloud gagal..."
+- **State**: `cloudSyncWarning` di-reset saat login baru atau logout.
+
+## Verifikasi (headless browser test)
+- Login dengan key random → app masuk ke homepage dalam ~8 detik
+  (waktu Firebase timeout), bukan stuck di black screen
+- Warning banner muncul: "Firebase belum dikonfigurasi (config masih
+  placeholder). App berjalan dalam mode LOCAL-ONLY..."
+- Homepage menampilkan "Pilih Karakter" + "Belum ada karakter"
+- Sidebar navigation berfungsi (Karakter, Buat Baru, Ekstensi, Pengaturan)
+- `npx tsc --noEmit` → 0 errors
+- `npm run build` → sukses
+
+## Catatan untuk User
+Untuk mengaktifkan cloud sync, edit `firebase-applet-config.json` dengan
+config Firebase project Anda yang sebenarnya (dari Firebase Console →
+Project Settings → Web App config). Jika tidak, app tetap berjalan
+normal dalam mode local-only (data tersimpan di browser via localforage,
+tidak disinkronisasi antar perangkat).

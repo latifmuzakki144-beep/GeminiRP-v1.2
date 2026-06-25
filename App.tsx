@@ -19,10 +19,12 @@ interface LayoutProps {
   onOpenSettings: () => void;
   onOpenExtensions: () => void;
   onLogout: () => void;
+  cloudSyncWarning?: string | null;
+  onDismissWarning?: () => void;
   children: React.ReactNode;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, onOpenSettings, onOpenExtensions, onLogout }) => {
+const Layout: React.FC<LayoutProps> = ({ children, onOpenSettings, onOpenExtensions, onLogout, cloudSyncWarning, onDismissWarning }) => {
   const location = useLocation();
 
   return (
@@ -43,13 +45,13 @@ const Layout: React.FC<LayoutProps> = ({ children, onOpenSettings, onOpenExtensi
             <i className="fas fa-users text-lg w-6 text-center"></i>
             <span className="hidden lg:block font-medium">Karakter</span>
           </Link>
-          
+
           <Link to="/create" className={`flex items-center gap-3 px-3 py-3 rounded-xl transition ${location.pathname === '/create' ? 'bg-primary-600/20 text-primary-400' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}>
             <i className="fas fa-plus-circle text-lg w-6 text-center"></i>
             <span className="hidden lg:block font-medium">Buat Baru</span>
           </Link>
 
-          <button 
+          <button
             onClick={onOpenExtensions}
             className="flex items-center gap-3 px-3 py-3 rounded-xl text-gray-400 hover:bg-gray-800 hover:text-white transition group cursor-pointer text-left w-full"
           >
@@ -59,15 +61,15 @@ const Layout: React.FC<LayoutProps> = ({ children, onOpenSettings, onOpenExtensi
         </div>
 
         <div className="p-4 border-t border-gray-800 flex flex-col gap-2">
-          <button 
+          <button
             onClick={onOpenSettings}
             className="flex items-center gap-3 w-full px-3 py-3 rounded-xl text-gray-400 hover:bg-gray-800 hover:text-white transition group"
           >
             <i className="fas fa-cog text-lg w-6 text-center group-hover:rotate-90 transition-transform"></i>
             <span className="hidden lg:block font-medium">Pengaturan</span>
           </button>
-          
-          <button 
+
+          <button
             onClick={onLogout}
             className="flex items-center gap-3 w-full px-3 py-3 rounded-xl text-red-400 hover:bg-red-900/30 transition group"
           >
@@ -78,8 +80,26 @@ const Layout: React.FC<LayoutProps> = ({ children, onOpenSettings, onOpenExtensi
       </nav>
 
       {/* Main Content */}
-      <main className="flex-1 h-screen overflow-hidden relative">
-        {children}
+      <main className="flex-1 h-screen overflow-hidden relative flex flex-col">
+        {/* P7-fix: Cloud sync warning banner — non-blocking, dismissible */}
+        {cloudSyncWarning && (
+          <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2 flex items-start gap-3 shrink-0 animate-fade-in">
+            <i className="fas fa-cloud-upload-alt text-amber-400 mt-0.5"></i>
+            <p className="text-xs text-amber-200 flex-1 leading-relaxed">{cloudSyncWarning}</p>
+            {onDismissWarning && (
+              <button
+                onClick={onDismissWarning}
+                className="text-amber-400 hover:text-white transition shrink-0 p-1"
+                title="Tutup peringatan"
+              >
+                <i className="fas fa-times text-sm"></i>
+              </button>
+            )}
+          </div>
+        )}
+        <div className="flex-1 overflow-hidden">
+          {children}
+        </div>
       </main>
     </div>
   );
@@ -155,6 +175,9 @@ const App: React.FC = () => {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [hasHouse, setHasHouse] = useState<boolean>(!!getHouseId());
+  // P7-fix: cloud sync warning state — set when Firebase sync fails so the app
+  // can still proceed in local-only mode instead of blocking the user.
+  const [cloudSyncWarning, setCloudSyncWarning] = useState<string | null>(null);
 
   const loadData = async () => {
     setIsLoading(true);
@@ -195,10 +218,26 @@ const App: React.FC = () => {
   const handleLogin = async (key: string) => {
     setIsLoading(true);
     setLoginError(null);
+    setCloudSyncWarning(null);
     try {
       setHouseId(key);
       setSyncProgress('Sinkronisasi Awal...');
-      await syncFromCloud((m) => setSyncProgress(m));
+      // P7-fix: Cloud sync failure should NOT block login.
+      // The app has a full local DB (localforage) and can work in local-only mode.
+      // If syncFromCloud fails (e.g. Firebase not configured, network error),
+      // we proceed with local data and show a non-blocking warning.
+      try {
+        await syncFromCloud((m) => setSyncProgress(m));
+      } catch (syncErr: any) {
+        console.warn("Cloud sync failed, proceeding in local-only mode:", syncErr);
+        const reason = syncErr?.message || String(syncErr || 'unknown error');
+        // Detect the most common cause: placeholder Firebase config
+        const isConfigError = reason.includes('remixed-') || reason.includes('Failed to get document') || reason.includes('client is offline') || reason.includes('unavailable');
+        const warning = isConfigError
+          ? 'Firebase belum dikonfigurasi (config masih placeholder). App berjalan dalam mode LOCAL-ONLY — data tersimpan di browser, tidak disinkronisasi ke cloud. Edit firebase-applet-config.json untuk mengaktifkan cloud sync.'
+          : `Sinkronisasi cloud gagal (${reason}). App berjalan dalam mode LOCAL-ONLY. Data tersimpan di browser.`;
+        setCloudSyncWarning(warning);
+      }
       setHasHouse(true);
     } catch (err: any) {
       console.error("Login failed", err);
@@ -218,13 +257,24 @@ const App: React.FC = () => {
     setIsLoading(true);
     setSyncProgress('Menyimpan ke Cloud sebelum Keluar...');
     try {
-      await syncToCloud((m) => setSyncProgress(m));
+      // P7-fix: Cloud sync failure during logout should NOT block logout.
+      // Local data is already saved continuously via localforage, so even if
+      // cloud upload fails the user can safely log out.
+      try {
+        await syncToCloud((m) => setSyncProgress(m));
+      } catch (syncErr: any) {
+        console.warn("Cloud sync failed during logout, proceeding anyway:", syncErr);
+        // Don't alert — just warn in console. Local data is already saved.
+      }
       await logout();
       setHasHouse(false);
       setCharacters([]);
+      setCloudSyncWarning(null);
     } catch (e) {
-      console.error("Logout Sync Failed", e);
-      alert("Gagal sinkron data ke cloud!");
+      console.error("Logout Failed", e);
+      // Even if logout() itself fails, reset the UI state so user isn't stuck
+      setHasHouse(false);
+      setCharacters([]);
     } finally {
       setIsLoading(false);
       setSyncProgress('');
@@ -257,10 +307,12 @@ const App: React.FC = () => {
   return (
     <HashRouter>
       <BridgeManager settings={settings} />
-      <Layout 
-        onOpenSettings={() => setIsSettingsOpen(true)} 
+      <Layout
+        onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenExtensions={() => setIsExtensionsOpen(true)}
         onLogout={triggerLogout}
+        cloudSyncWarning={cloudSyncWarning}
+        onDismissWarning={() => setCloudSyncWarning(null)}
       >
         <Routes>
           <Route path="/" element={<HomePage characters={characters} setCharacters={setCharacters} />} />
